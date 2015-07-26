@@ -1,0 +1,293 @@
+---
+title: "Storm Damage Report for the USA (1950-2011)"
+date: "July 26, 2015"
+author: "adatum"
+output:
+  html_document:
+    fig_caption: yes
+    theme: cerulean
+---
+
+## Synopsis
+
+The Storm Data from the U.S. National Oceanic and Atmospheric Administration's (NOAA) contains reports of storm events and their consequences since 1950, with a varying, and generally increasing, level of thoroughness and detail over the years. Here the data are analyzed to identify and report on the extent of the impact of the top ten types of storm events based on their human consequences, through fatalities and injuries, and their economic consequences, though damage to property and crops. To this end, the data is loaded and sanitized with the R statistical programming language. Monetary amounts, reported over the course of more than 60 years, are standardized into 2011 US Dollars by indexing for inflation using the Consumer Price Index (CPI).
+
+## Data Processing
+
+First we will load the libraries we will need:
+```{r load-libraries, message=FALSE}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+```
+
+We download the Storm Data from the U.S. National Oceanic and Atmospheric Administration's (NOAA) from [this link](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2). Since it can take a while to read this large data file, we will load it only after first checking if it isn't already loaded.
+
+```{r get-data, cache=TRUE}
+if(!exists("full_sdata")){
+        datafile <- "sdata.csv.bz2"
+        
+        if(!file.exists(datafile)){
+        url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+        download.file(url, datafile, method = "curl")
+        }
+        
+        full_sdata <- read.csv(datafile)
+}
+
+dim(full_sdata)
+names(full_sdata)
+```
+
+To reduce processing time and memory requirements, we will retain only those variables (columns) which are relevant to our analysis, namely:`BGN_DATE`, `EVTYPE`, `FATALITIES`, `INJURIES`, `PROPDMG`, `PROPDMGEXP`, `CROPDMG`, and, `CROPDMGEXP`.
+
+```{r load-data, cache=TRUE}
+sdata <- full_sdata %>% 
+        select(BGN_DATE, EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP) %>% 
+        mutate(DATE = mdy_hms(BGN_DATE)) %>%
+        select(-BGN_DATE)
+
+str(sdata)
+```
+
+The property damage and crop damage are each given in two parts: a value, and an exponent, which can be `K` or `k` for 10^3^, `M` or `m` for 10^6^, or `B` or `b` for 10^9^. We define the helper function `mergval` to merge values and exponents into a single result and then use `mapply` to update the dataset.
+
+```{r merge-vals, cache=TRUE}
+
+mergval <- function(val, expo){
+        
+        if(expo %in% c("B", "b")){
+                expo <- 9
+        } else if (expo %in% c("M", "m")){ 
+                expo <- 6
+        } else if (expo %in% c("K", "k")){
+                expo <- 3
+        } else {
+                expo <- 0
+        }
+           
+        val*10^expo  
+}
+
+sdata$PROPDMG <- mapply(mergval, sdata$PROPDMG, sdata$PROPDMGEXP)
+sdata$CROPDMG <- mapply(mergval, sdata$CROPDMG, sdata$CROPDMGEXP)
+
+#drop the PROPDMGEXP and CROPDMGEXP columnns which are no longer needed
+sdata <- subset(sdata, select = -c(PROPDMGEXP, CROPDMGEXP))
+```
+  
+The damage values are given in US Dollars for the years in which they were recorded. To have a meaningful comparison of the cost of damages, the cost for each year will be adjusted to 2011 US Dollars. To make this adjustment we use the annual average historical CPI (Consumer Price Index) values from Table 24 of the [CPI report by the US Bureau of Labor Statistics](http://www.bls.gov/cpi/cpid1503.pdf). The values are adjusted as 
+  
+\[
+Cost_{f} = Cost_{i}\times\frac{CPI_f}{CPI_i}
+\] 
+
+where $f$ is the final year of interest (2011 in this case), and $i$ is the year in which the cost was reported.
+
+It should be noted that the frequency of the claims is not similar for each year, as shown in the histogram below. This means that the dataset is most likely underrepresenting the events and costs from earlier years in the dataset.
+
+```{r, histogram}
+hist(year(sdata$DATE),
+     breaks = 50,
+     main = "Frequency of reported weather events in Storm Data",
+     xlab = "Year",
+     ylab = "Number of reported events",
+     col = "skyblue"
+     )
+```
+
+Despite many events spanning varying amounts of time, we will take the year of a weather event as its beginning date, especially since the original data set does not have end dates for many of the events. 
+
+  
+```{r cpi, cache=TRUE}
+# store CPI values for 1950-2011 from http://www.bls.gov/cpi/cpid1503.pdf
+CPI <- data.frame(
+    YEAR = 1950:2011,
+    CPI = c(24.1, 26.0, 26.5, 26.7, 26.9, 26.8, 27.2, 28.1, 28.9, 29.1, 29.6, 29.9, 30.2, 30.6, 31.0, 31.5, 32.4, 33.4, 34.8, 36.7, 38.8, 40.5, 41.8, 44.4, 49.3, 53.8, 56.9, 60.6, 65.2, 72.6, 82.4, 90.9, 96.5, 99.6, 103.9, 107.6, 109.6, 113.6, 118.3, 124.0, 130.7, 136.2, 140.3, 144.5, 148.2, 152.4, 156.9, 160.5, 163.0, 166.6, 172.2, 177.1, 179.9, 184.0, 188.9, 195.3, 201.6, 207.342, 215.303, 214.537, 218.056, 224.939)
+    )
+
+# define function to calculate adjusted cost based on CPI
+CPI_adj_cost <- function(cost_i, year_i, cpi_f){
+        cost_i * cpi_f / CPI$CPI[which(CPI$YEAR == year_i)]
+}
+
+year_f <- 2011   # costs will be adjusted to US Dollars of year_f
+CPI_f <- CPI$CPI[which(CPI$YEAR == year_f)]
+
+sdata$PROPDMG <- mapply(CPI_adj_cost, sdata$PROPDMG, year(sdata$DATE), CPI_f)
+```
+
+To make plotting easier, we tidy the data and retain only those rows which have non-zero economic or human costs:
+
+```{r tidy-data}
+tidy_sdata <- sdata %>%
+        gather(key = ECONOMIC_CONSEQUENCE, value = COST, c(PROPDMG, CROPDMG)) %>%
+        gather(key = HEALTH_CONSEQUENCE, value = HUMAN_COST, c(FATALITIES, INJURIES)) %>%
+        filter(COST > 0 | HUMAN_COST > 0) %>%
+        select(-DATE) %>%
+        droplevels()
+
+str(tidy_sdata)
+```
+
+Now we can deal with the event types, `EVTYPE`, which have 48 official categories as defined in the [National Weather Service Storm Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf). However, the `EVTYPE` factor variable has far more levels: 985 to be exact, or 488 even when events with no associated cost are removed. There are various data entry errors, spelling/capitalization issues, and redundant entries which we can correct and consolidate to make later analysis more accurate. 
+
+A judgement call is made when it is unclear how unofficial event types are to be merged into the 48 official event types. Generally, if two official terms are entered for the same event, the first one mentioned will take precedence. Regular expressions are used to identify potential matches to the official type, designated in all capital letters. Trial and error was used, along with the process of elimination going from more specific to less specific search terms/patterns, to incrementally narrow down the remaining un-sanitized event types, which were first all converted to lower case. This allows the cleaning process to ignore any event types already filtered as official types, since they were converted to capital letters, and since the regex patterns used in `grep` are lower case only. One consequence is that the filtering `grep` commands *must* be performed in the given order.
+
+```{r evtype-cleanup}
+evt <- tidy_sdata$EVTYPE
+evt <- tolower(evt) #standardize to lower case to identify unprocessed entries
+
+#the order of the following grep lines *must* be preserved
+#grep must only search on lower case, since upper case denotes filtered entries
+evt[grep("astro.*tide", evt)] <- "ASTRONOMICAL LOW TIDE"
+evt[grep("^(high|non).*wind", evt)] <- "HIGH WIND"
+evt[grep("lake.*snow", evt)] <- "LAKE-EFFECT SNOW"
+evt[grep("snow", evt)] <- "HEAVY SNOW"
+evt[grep("avalanc", evt)] <- "AVALANCHE"
+evt[grep("blizzard", evt)] <- "BLIZZARD"
+evt[grep("rip", evt)] <- "RIP CURRENT"
+evt[grep("surf", evt)] <- "HIGH SURF"
+evt[grep("coastal", evt)] <- "COASTAL FLOOD"
+evt[grep("extreme cold|chill", evt)] <- "EXTREME COLD/WIND CHILL"
+evt[grep("dust devil", evt)] <- "DUST DEVIL"
+evt[grep("spout", evt)] <- "WATERSPOUT"
+evt[grep("torn", evt)] <- "TORNADO"
+evt[grep("cold", evt)] <- "COLD/WIND CHILL"
+evt[grep("^(?!flash).*(debris flow|erosion|mud|slide)", evt, perl = T)] <- "DEBRIS FLOW"
+evt[grep("freezing fog", evt)] <- "FREEZING FOG"
+evt[grep("fog", evt)] <- "DENSE FOG"
+evt[grep("smoke", evt)] <- "DENSE SMOKE"
+evt[grep("drought", evt)] <- "DROUGHT"
+evt[grep("dust", evt)] <- "DUST STORM"
+evt[grep("(extreme|excessive|record) heat", evt)] <- "EXCESSIVE HEAT"
+evt[grep("heat|warm", evt)] <- "HEAT"
+evt[grep("flash flood", evt)] <- "FLASH FLOOD"
+evt[grep("lake.*flood", evt)] <- "LAKESHORE FLOOD"
+evt[grep("marine (thunderstorm|tstm) wind", evt)] <- "MARINE THUNDERSTORM WIND"
+evt[grep("(?!frost|freeze)(sleet|freez)", evt, perl = T)] <- "SLEET"
+evt[grep("^(?!(flood|light)).*(rain|shower|precip)", evt, perl = T)] <- "HEAVY RAIN"
+evt[grep("^(?!(tstm|thunder)).*lig[h|n]?t", evt, perl = T)] <- "LIGHTNING"
+evt[grep("mar.*high.*wind", evt)] <- "MARINE HIGH WIND"
+evt[grep("mar.*strong.*wind", evt)] <- "MARINE STRONG WIND"
+evt[grep("(t[h]?u[n]?[d]?er|tstm)", evt)] <- "THUNDERSTORM WIND"
+evt[grep("flood|urban", evt)] <- "FLOOD"
+evt[grep("frost|freeze", evt)] <- "FROST/FREEZE"
+evt[grep("funnel", evt)] <- "FUNNEL CLOUD"
+evt[grep("mar.*hail", evt)] <- "MARINE HAIL"
+evt[grep("hurr|typh", evt)] <- "HURRICANE/TYPHOON"
+evt[grep("wint.*storm", evt)] <- "WINTER STORM"
+evt[grep("wint.*(weath|mix)", evt)] <- "WINTER WEATHER"
+evt[grep("^(?!hail|ice).*wind", evt, perl = T)] <- "STRONG WIND"
+evt[grep("hail", evt)] <- "HAIL"
+evt[grep("ic[e|y]", evt)] <- "ICE STORM"
+evt[grep("seiche", evt)] <- "SEICHE"
+evt[grep("trop.*dep", evt)] <- "TROPICAL DEPRESSION"
+evt[grep("trop.*storm", evt)] <- "TROPICAL STORM"
+evt[grep("surge|tide", evt)] <- "STORM TIDE"
+evt[grep("tsu", evt)] <- "TSUNAMI"
+evt[grep("volc", evt)] <- "VOLCANIC ASH"
+evt[grep("fire", evt)] <- "WILDFIRE"
+
+#official event types
+#otypes <- c("ASTRONOMICAL LOW TIDE", "AVALANCHE", "BLIZZARD", "COASTAL FLOOD", "COLD/WIND CHILL", "DEBRIS FLOW", "DENSE FOG", "DENSE SMOKE", "DROUGHT", "DUST DEVIL", "DUST STORM", "EXCESSIVE HEAT", "EXTREME COLD/WIND CHILL", "FLASH FLOOD", "FLOOD", "FREEZING FOG", "FROST/FREEZE", "FUNNEL CLOUD", "HAIL", "HEAT", "HEAVY RAIN", "HEAVY SNOW", "HIGH SURF", "HIGH WIND", "HURRICANE/TYPHOON", "ICE STORM", "LAKESHORE FLOOD", "LAKE-EFFECT SNOW", "LIGHTNING", "MARINE HAIL", "MARINE HIGH WIND", "MARINE STRONG WIND", "MARINE THUNDERSTORM WIND", "RIP CURRENT", "SEICHE", "SLEET", "STORM TIDE", "STRONG WIND", "THUNDERSTORM WIND", "TORNADO", "TROPICAL DEPRESSION", "TROPICAL STORM", "TSUNAMI", "VOLCANIC ASH", "WATERSPOUT", "WILDFIRE", "WINTER STORM", "WINTER WEATHER")
+
+tidy_sdata$EVTYPE <- factor(evt)  #assign sanitized event types back to dataset
+
+levels(tidy_sdata$EVTYPE)
+```
+
+The event types are now mostly merged into the official event types. There are still some that our filters did not catch, however, further effort will yield diminishing returns, especially since the remaining types are unlikely to change the ranking positions of the top event types.
+
+Lastly, with the cleaned-up levels of `EVTYPE` we can sum up the impacts of each type to get an aggregated view of their consequences. It could also be interesting to take the mean, or median since the data are probably skewed, instead of the sum to get an idea of which events have greater consequences, on average. However, here we will focus on the sum.
+
+```{r summarise-results}
+results <- tidy_sdata %>%
+        group_by(EVTYPE, ECONOMIC_CONSEQUENCE, HEALTH_CONSEQUENCE) %>%
+        summarise_each(funs(sum)) %>%  # sum consequences grouped by event type
+        ungroup()
+
+str(results)
+```
+
+
+
+## Results
+
+Here we visualize the results of the top ten event types causing the most human consequences, in terms of fatalities and injuries.
+
+```{r health_plot, results="hide", fig.width=10}
+topn <- 10      #number of top storm events to plot
+
+hfplot_data <- results %>% 
+        select(-c(ECONOMIC_CONSEQUENCE, COST)) %>% 
+        filter(HEALTH_CONSEQUENCE == "FATALITIES") %>% 
+        unique() %>% 
+        top_n(topn, HUMAN_COST) %>% 
+        arrange(desc(HUMAN_COST))
+
+hiplot_data <- results %>% 
+        select(-c(ECONOMIC_CONSEQUENCE, COST)) %>% 
+        filter(HEALTH_CONSEQUENCE == "INJURIES") %>% 
+        unique() %>% 
+        top_n(topn, HUMAN_COST) %>% 
+        arrange(desc(HUMAN_COST))
+
+hfplot <- ggplot(data = hfplot_data, aes(x = reorder(EVTYPE, HUMAN_COST), y = HUMAN_COST)) +
+        geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+        facet_grid(.~HEALTH_CONSEQUENCE) +
+        labs(x = "", y = "") + 
+        coord_flip() +
+        theme_bw()
+
+hiplot <- ggplot(data = hiplot_data, aes(x = reorder(EVTYPE, HUMAN_COST), y = HUMAN_COST)) +
+        geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+        facet_grid(.~HEALTH_CONSEQUENCE) +
+        xlab("") + 
+        ylab("") +
+        coord_flip() +
+        theme_bw()
+
+grid.arrange(hfplot, hiplot, top = "Top 10 most harmful storm event types for population health", ncol = 2)
+        
+```
+
+Similarly, here are the top ten events for economic consequences, as measured by property damage and crop damage in 2011 US Dollars.
+
+```{r economic_plot, results="hide", fig.width=10}
+topn <- 10      #number of top storm events to plot
+
+epplot_data <- results %>% 
+        select(-c(HEALTH_CONSEQUENCE, HUMAN_COST)) %>% 
+        filter(ECONOMIC_CONSEQUENCE == "PROPDMG") %>% 
+        unique() %>% 
+        top_n(topn, COST) %>% 
+        arrange(desc(COST))
+
+ecplot_data <- results %>% 
+        select(-c(HEALTH_CONSEQUENCE, HUMAN_COST)) %>% 
+        filter(ECONOMIC_CONSEQUENCE == "CROPDMG") %>% 
+        unique() %>% 
+        top_n(topn, COST) %>% 
+        arrange(desc(COST))
+
+epplot <- ggplot(data = epplot_data, aes(x = reorder(EVTYPE, COST), y = COST)) +
+        geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+        facet_grid(.~ECONOMIC_CONSEQUENCE) +
+        labs(x = "", y = "Cost [2011 US Dollars]") + 
+        coord_flip() +
+        theme_bw()
+
+ecplot <- ggplot(data = ecplot_data, aes(x = reorder(EVTYPE, COST), y = COST)) +
+        geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+        facet_grid(.~ECONOMIC_CONSEQUENCE) +
+        labs(x = "", y = "Cost [2011 US Dollars]") + 
+        coord_flip() +
+        theme_bw()
+
+grid.arrange(epplot, ecplot, top = "Top 10 most economically damaging storm event types", ncol = 2)
+
+```
+
